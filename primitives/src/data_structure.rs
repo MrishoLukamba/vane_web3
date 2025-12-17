@@ -536,10 +536,6 @@ pub enum NetworkCommand {
     TxSubmissionUpdate {
         account_id: String,
         data: TxStateMachine
-    },
-    Close {
-        account_id: String,
-        data: TxStateMachine
     }
 }
 

@@ -501,28 +501,12 @@ impl VaneSwarmServer {
             anyhow!("Failed to decode TxStateMachine: {}", e)
         })?;
 
-        info!("IN SERVER TX REVERTATION STATUS: {:?}",tx_state.status);
 
         let multi_id_hex = hex::encode(tx_state.multi_id);
         let receiver_address = tx_state.receiver_address.clone();
 
-        // Ensure the peer relationship exists (sender -> receiver)
-        if !self
-            .peers
-            .get(&address)
-            .map(|targets| targets.contains_key(&receiver_address))
-            .unwrap_or(false)
-        {
-            warn!(
-                "Peer not found for sender {} and receiver {} during sender revertation",
-                address, receiver_address
-            );
-            return Err(anyhow!(
-                "Peer not found for sender {} and receiver {}",
-                address,
-                receiver_address
-            ));
-        }
+        info!("in server, receiver address: {}, sender address: {}, tx revertation status: {:?}", tx_state.receiver_address, receiver_address, tx_state.status);
+
 
         // Ensure the transaction exists
         if !self.requests.contains_key(&multi_id_hex) {
@@ -556,7 +540,7 @@ impl VaneSwarmServer {
         // Emit backend event for sender revertation
         let event = BackendEvent::SenderReverted {
             address: address.clone(),
-            data,
+            data: data.clone(),
         };
         let _ = self.event_sender.send(event.clone());
 
@@ -570,6 +554,68 @@ impl VaneSwarmServer {
             "Successfully handled sender revertation: address: {}, data: {}",
             event.get_address(),
             trimmed_data
+        );
+
+        // Peer and receiver_request cleanup (formerly in `disconnect_peer`)
+        let account_id = receiver_address.as_str();
+
+        if let Some(mut entry) = self.receiver_requests.get_mut(account_id) {
+            entry.multi_ids.retain(|multi_id| multi_id != &multi_id_hex);
+            if entry.multi_ids.is_empty() {
+                drop(entry);
+                self.receiver_requests.remove(account_id);
+            }
+            info!(
+                "Removed multi_id {} from receiver_requests for account_id: {}",
+                multi_id_hex, account_id
+            );
+        } else {
+            warn!(
+                "Receiver address {} not found in receiver_requests during revertation cleanup",
+                account_id
+            );
+        }
+
+        let mut sender_key_to_remove: Option<String> = None;
+
+        for (sender_key, target_peers) in self.peers.iter_mut() {
+            if let Some(peer) = target_peers.get(account_id) {
+                if peer.times_requested == 1 {
+                    target_peers.remove(account_id);
+                    if target_peers.is_empty() {
+                        sender_key_to_remove = Some(sender_key.clone());
+                    }
+                    self.metrics.record_peer_removed().await;
+
+                    let notification = SystemNotification::PeerRemoved {
+                        address: sender_key.clone(),
+                    };
+                    let _ = self.system_notification_sender.try_send(notification);
+
+                    let event = BackendEvent::PeerDisconnected {
+                        account_id: account_id.to_string(),
+                    };
+                    let _ = self.event_sender.send(event.clone());
+                    info!("succesfully disconnected peer during revertation: {:?}", event);
+
+                    if let Some(key) = sender_key_to_remove {
+                        self.peers.remove(&key);
+                    }
+                    self.update_metrics().await;
+                    return Ok(());
+                } else {
+                    info!(
+                        "No-op: times_requested is {} (more than 1) for peer - sender: {}, account_id: {} during revertation cleanup",
+                        peer.times_requested, sender_key, account_id
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        warn!(
+            "Peer with account_id {} not found during revertation cleanup",
+            account_id
         );
 
         Ok(())
@@ -726,9 +772,7 @@ impl VaneSwarmServer {
                     })?;
 
                     info!("FETCHING TX UPDATES STATUS: {:?}",tx_state.status);
-                    if !matches!(tx_state.status, TxStatus::Reverted(_)) {
-                        pending_transactions.push(tx_state);
-                    }
+                    pending_transactions.push(tx_state);
                 }
             }
         }
@@ -751,70 +795,6 @@ impl VaneSwarmServer {
         }
 
         Ok(pending_transactions)
-    }
-
-    pub async fn disconnect_peer(&mut self, account_id: &str, data: Vec<u8>) -> Result<()> {
-        info!("Disconnecting peer - account_id: {}", account_id);
-
-       
-        let tx_state: TxStateMachine = serde_json::from_slice(&data).map_err(|e| {
-            error!(
-                "Failed to decode TxStateMachine from disconnect_peer {}: {}",
-                account_id, e
-            );
-            anyhow!("Failed to decode TxStateMachine: {}", e)
-        })?;
-
-        let multi_id_hex = hex::encode(tx_state.multi_id);
-
-        if let Some(mut entry) = self.receiver_requests.get_mut(account_id) {
-            entry.multi_ids.retain(|multi_id| multi_id != &multi_id_hex);
-            if entry.multi_ids.is_empty() {
-                drop(entry);
-                self.receiver_requests.remove(account_id);
-            }
-            info!("Removed multi_id {} from receiver_requests for account_id: {}", multi_id_hex, account_id);
-        } else {
-            warn!("Receiver address {} not found in receiver_requests", account_id);
-        }
-        
-
-        let mut sender_key_to_remove: Option<String> = None;
-
-        for (sender_key, target_peers) in self.peers.iter_mut() {
-            if let Some(peer) = target_peers.get(account_id) {
-                if peer.times_requested == 1 {
-                    target_peers.remove(account_id);
-                    if target_peers.is_empty() {
-                        sender_key_to_remove = Some(sender_key.clone());
-                    }
-                    self.metrics.record_peer_removed().await;
-
-                    let notification = SystemNotification::PeerRemoved {
-                        address: sender_key.clone(),
-                    };
-                    let _ = self.system_notification_sender.try_send(notification);
-
-                    let event = BackendEvent::PeerDisconnected {
-                        account_id: account_id.to_string(),
-                    };
-                    let _ = self.event_sender.send(event.clone());
-                    info!("succesfully disconnected peer: {:?}", event);
-
-                    if let Some(key) = sender_key_to_remove {
-                        self.peers.remove(&key);
-                    }
-                    self.update_metrics().await;
-                    return Ok(());
-                } else {
-                    info!("No-op: times_requested is {} (more than 1) for peer - sender: {}, account_id: {}", peer.times_requested, sender_key, account_id);
-                    return Ok(());
-                }
-            }
-        }
-
-        warn!("Peer with account_id {} not found", account_id);
-        Err(anyhow!("Peer with account_id {} not found", account_id))
     }
 
     async fn update_metrics(&self) {
@@ -869,20 +849,13 @@ pub trait BackendRpc {
     #[method(name = "handleTxSubmissionUpdates")]
     async fn handle_tx_submission_updates(&self, address: String, data: Vec<u8>) -> RpcResult<()>;
 
-    /// Disconnect a peer from target peers
-    /// params:
-    ///
-    /// - `account_id`: Account ID of the peer to disconnect
-    #[method(name = "disconnectPeer")]
-    async fn disconnect_peer(&self, account_id: String, data: Vec<u8>) -> RpcResult<()>;
-
     /// Fetch pending transactions
     /// params:
     ///
     /// - `address`: The address to fetch pending transactions for
     #[method(name = "fetchPendingTransactions")]
     async fn fetch_pending_transactions(&self, address: String) -> RpcResult<()>;
-
+    
     /// Subscribe to events filtered by address
     /// params:
     ///
@@ -1002,16 +975,6 @@ impl BackendRpcServer for BackendRpcHandler {
         };
         let _ = self.event_sender.send(event);
         
-        Ok(())
-    }
-
-    async fn disconnect_peer(&self, account_id: String, data: Vec<u8>) -> RpcResult<()> {
-        info!("RPC: disconnect_peer called - account_id: {}", account_id);
-        let mut server = self.swarm_server.lock().await;
-        server.disconnect_peer(&account_id, data).await.map_err(|e| {
-            error!("RPC: Failed to disconnect peer: {}", e);
-            jsonrpsee::core::Error::Custom(e.to_string())
-        })?;
         Ok(())
     }
 

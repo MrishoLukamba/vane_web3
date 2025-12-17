@@ -530,10 +530,9 @@ impl PublicInterfaceWorker {
             Err(anyhow!("Receiver did not confirm".to_string()))
                 .map_err(|e| JsError::new(&format!("{:?}", e)))?
         }
-        // remove from cache
-        self.lru_cache.borrow_mut().demote(&tx.tx_nonce.into());
 
         tx.recv_confirmed();
+        
         tx.increment_version();
         sender_channel
             .send(tx)
