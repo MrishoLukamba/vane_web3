@@ -1,4 +1,4 @@
-use anyhow::{Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
 use simplelog::*;

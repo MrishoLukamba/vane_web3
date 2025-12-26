@@ -32,9 +32,9 @@ use crate::{
 };
 
 use primitives::data_structure::{
-    AccountInfo, BackendEvent, ChainSupported, DbTxStateMachine, DbWorkerInterface,
-    StorageExport, Token, TtlWrapper, TxStateMachine, TxStatus, UserAccount,
-    UserMetrics, NetworkCommand,
+    AccountInfo, BackendEvent, ChainSupported, ChainTransactionType, DbTxStateMachine,
+    DbWorkerInterface, NetworkCommand, StorageExport, Token, TtlWrapper, TxStateMachine, TxStatus,
+    UserAccount, UserMetrics,
 };
 
 #[derive(Clone)]
@@ -105,6 +105,71 @@ impl PublicInterfaceWorker {
 
         let integrity_hash = blake2_256(&data_to_hash);
         integrity_hash
+    }
+
+    // TODO: see how we can deserialize bytes data in solana and in EVM so that we can hash the params
+    pub fn compute_tx_call_payload_integrity_hash(
+        tx: &TxStateMachine,
+    ) -> Result<[u8; 32], JsError> {
+        // check for each and extract the data from call_payload
+        let integrity_hash = match &tx.call_payload {
+            Some(ChainTransactionType::Solana {
+                call_payload: _,
+                latest_block_height: _,
+            }) => {
+                let data_to_hash = (
+                    tx.sender_address.clone(),
+                    tx.receiver_address.clone(),
+                    tx.sender_address_network.clone(),
+                    tx.receiver_address_network.clone(),
+                    tx.multi_id.clone(),
+                    tx.token.clone(),
+                    tx.amount.clone(),
+                )
+                    .encode();
+                let integrity_hash = blake2_256(&data_to_hash);
+                integrity_hash
+            }
+            Some(ChainTransactionType::Ethereum {
+                eth_unsigned_tx_fields,
+                call_payload: _,
+            }) => {
+                let data_to_hash = (
+                    tx.sender_address.clone(),
+                    tx.receiver_address.clone(),
+                    tx.sender_address_network.clone(),
+                    tx.receiver_address_network.clone(),
+                    tx.multi_id.clone(),
+                    tx.token.clone(),
+                    tx.amount.clone(),
+                )
+                    .encode();
+                let integrity_hash = blake2_256(&data_to_hash);
+                integrity_hash
+            }
+            Some(ChainTransactionType::Bnb {
+                call_payload: _,
+                bnb_legacy_tx_fields,
+            }) => {
+                let data_to_hash = (
+                    tx.sender_address.clone(),
+                    tx.receiver_address.clone(),
+                    tx.sender_address_network.clone(),
+                    tx.receiver_address_network.clone(),
+                    tx.multi_id.clone(),
+                    tx.token.clone(),
+                    tx.amount.clone(),
+                )
+                    .encode();
+                let integrity_hash = blake2_256(&data_to_hash);
+                integrity_hash
+            }
+            None => {
+                return Err(JsError::new("Call payload is not available"));
+            }
+        };
+
+        Ok(integrity_hash)
     }
 
     pub async fn initiate_transaction(
@@ -432,14 +497,15 @@ impl PublicInterfaceWorker {
     }
 
     pub async fn fetch_pending_tx_updates(&self) -> Result<JsValue, JsError> {
-
         // call fetch_pending_tx_updates from backend
         let account_id = self.p2p_worker.user_account_id.clone();
         let command_tx = self.p2p_network_service.p2p_command_tx.clone();
-        command_tx.send(NetworkCommand::FetchPendingTransactions { account_id }).await?;
-        
+        command_tx
+            .send(NetworkCommand::FetchPendingTransactions { account_id })
+            .await?;
+
         TimeoutFuture::new(2000).await;
-        
+
         // flush out valyues that have been expired
         let now = (js_sys::Date::now() / 1000.0) as u32;
         info!("🔑 NOW: {:?}", now);
@@ -486,11 +552,43 @@ impl PublicInterfaceWorker {
             .map_err(|e| JsError::new(&format!("Serialization error: {:?}", e)))
     }
 
-    pub async fn add_account(&self, account_id: String, network: ChainSupported) -> Result<(), JsError> {
+    pub async fn add_account(
+        &self,
+        account_id: String,
+        network: ChainSupported,
+    ) -> Result<(), JsError> {
         self.db_worker
             .update_user_account(account_id, network)
             .await
             .map_err(|e| JsError::new(&format!("Failed to add account to database: {:?}", e)))?;
+        Ok(())
+    }
+
+    pub async fn verify_tx_call_payload(&self, tx: JsValue) -> Result<(), JsError> {
+        let tx: TxStateMachine = TxStateMachine::from_js_value_unconditional(tx)?;
+
+        let tx_call_payload_integrity_hash = Self::compute_tx_call_payload_integrity_hash(&tx)?;
+        let tx_integrity_hash = Self::compute_tx_integrity_hash(&tx);
+
+        // check if the tx_integrity_hash is the same as the tx_integrity_hash in the cache
+        let cached_tx_integrity_hash = self
+            .tx_integrity
+            .borrow_mut()
+            .get(&tx.tx_nonce)
+            .ok_or(JsError::new(&format!(
+                " Failed get transaction integrity from cache"
+            )))?
+            .clone();
+
+        if tx_integrity_hash != cached_tx_integrity_hash {
+            return Err(JsError::new("Transaction integrity failed"));
+        }
+
+        // check if if its the same with the integrity in call_payload
+        if tx_call_payload_integrity_hash != tx_integrity_hash {
+            return Err(JsError::new("Transaction call payload integrity failed"));
+        }
+
         Ok(())
     }
 
@@ -532,7 +630,7 @@ impl PublicInterfaceWorker {
         }
 
         tx.recv_confirmed();
-        
+
         tx.increment_version();
         sender_channel
             .send(tx)
@@ -573,7 +671,6 @@ impl PublicInterfaceWorker {
                 Ok(())
             }
             _ => {
-
                 tx.status =
                     TxStatus::Reverted(reason.unwrap_or("Intended receiver not met".to_string()));
                 // Immediately reflect in local cache for UI/state reads
@@ -675,6 +772,12 @@ impl PublicInterfaceWorker {
         Ok(())
     }
 
+    pub fn clear_cache(&self) -> Result<(), JsError> {
+        self.lru_cache.borrow_mut().clear();
+        self.tx_integrity.borrow_mut().clear();
+        info!("Cleared all from cache");
+        Ok(())
+    }
 }
 
 // =================== The interface =================== //
@@ -768,13 +871,22 @@ impl PublicInterfaceWorkerJs {
     #[wasm_bindgen(js_name = "addAccount")]
     pub async fn add_account(&self, account_id: String, network: JsValue) -> Result<(), JsError> {
         let network_chain: ChainSupported = ChainSupported::from_js_value_unconditional(network)?;
-        self.inner.borrow().add_account(account_id, network_chain).await?;
+        self.inner
+            .borrow()
+            .add_account(account_id, network_chain)
+            .await?;
         Ok(())
     }
 
     #[wasm_bindgen(js_name = "receiverConfirm")]
     pub async fn receiver_confirm(&self, tx: JsValue) -> Result<(), JsError> {
         self.inner.borrow().receiver_confirm(tx).await?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = "verifyTxCallPayload")]
+    pub async fn verify_tx_call_payload(&self, tx: JsValue) -> Result<(), JsError> {
+        self.inner.borrow().verify_tx_call_payload(tx).await?;
         Ok(())
     }
 
@@ -808,6 +920,12 @@ impl PublicInterfaceWorkerJs {
     #[wasm_bindgen(js_name = "clearFinalizedFromCache")]
     pub fn clear_finalized_from_cache(&self) -> Result<(), JsError> {
         self.inner.borrow().clear_finalized_from_cache()?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = "clearCache")]
+    pub fn clear_cache(&self) -> Result<(), JsError> {
+        self.inner.borrow().clear_cache()?;
         Ok(())
     }
 }

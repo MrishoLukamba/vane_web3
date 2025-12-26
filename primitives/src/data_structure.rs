@@ -247,6 +247,37 @@ where
     }
 }
 
+fn serialize_u128_as_string<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_u128_from_string<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => {
+            if let Some(stripped) = s.strip_prefix("0x") {
+                u128::from_str_radix(stripped, 16).map_err(D::Error::custom)
+            } else {
+                s.parse::<u128>().map_err(D::Error::custom)
+            }
+        }
+        Value::Number(n) => {
+            if let Some(num) = n.as_u64() {
+                Ok(num as u128)
+            } else {
+                Err(D::Error::custom("number out of range for u128"))
+            }
+        }
+        _ => Err(D::Error::custom("Expected string or number for u128")),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct WasmDhtResponse {
     pub peer_id: Option<PeerId>,
@@ -261,6 +292,8 @@ pub struct WasmDhtRequest {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Encode, Decode)]
 pub struct UnsignedEip1559 {
     pub to: String,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub value: u128,
     #[serde(rename = "chainId")]
     pub chain_id: u64,
@@ -280,6 +313,8 @@ pub struct UnsignedEip1559 {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Encode, Decode)]
 pub struct UnsignedBnbLegacy {
     pub to: String,
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub value: u128,
     #[serde(rename = "chainId")]
     pub chain_id: u64,
@@ -318,6 +353,8 @@ pub struct TxStateMachine {
     #[serde(rename = "codeWord")]
     pub code_word: String,
     /// amount to be sent
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub amount: u128,
     /// fees amount
     #[serde(rename = "feesAmount")]
@@ -527,16 +564,16 @@ pub enum NetworkCommand {
     },
     RevertTransaction {
         account_id: String,
-        data: TxStateMachine
+        data: TxStateMachine,
     },
     ConfirmTransaction {
         account_id: String,
-        data: TxStateMachine
+        data: TxStateMachine,
     },
     TxSubmissionUpdate {
         account_id: String,
-        data: TxStateMachine
-    }
+        data: TxStateMachine,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -558,7 +595,7 @@ pub enum SwarmMessage {
     PendingTransactionsFetched {
         address: String,
         transactions: Vec<TxStateMachine>,
-    }
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -575,6 +612,8 @@ pub struct DbTxStateMachine {
     // Tx hash based on the chain hashing algorithm
     pub tx_hash: Vec<u8>,
     // amount to be sent
+    #[serde(serialize_with = "serialize_u128_as_string")]
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub amount: u128,
     // token
     pub token: Token,
@@ -1008,16 +1047,45 @@ pub struct StorageExport {
 // Backend events for JSON-RPC communication
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Encode, Decode)]
 pub enum BackendEvent {
-    SenderRequestReceived { address: String, data: Vec<u8> },
-    SenderRequestHandled { address: String, data: Vec<u8> },
-    SenderConfirmed { address: String, data: Vec<u8> },
-    SenderReverted { address: String, data: Vec<u8> },
-    ReceiverResponseReceived { address: String, data: Vec<u8> },
-    ReceiverResponseHandled { address: String, data: Vec<u8> },
-    PeerDisconnected { account_id: String },
-    DataExpired { multi_id: String, data: Vec<u8> },
-    PendingTransactionsFetched { address: String, transactions: Vec<TxStateMachine> },
-    TxSubmitted { address: String, data: Vec<u8> },
+    SenderRequestReceived {
+        address: String,
+        data: Vec<u8>,
+    },
+    SenderRequestHandled {
+        address: String,
+        data: Vec<u8>,
+    },
+    SenderConfirmed {
+        address: String,
+        data: Vec<u8>,
+    },
+    SenderReverted {
+        address: String,
+        data: Vec<u8>,
+    },
+    ReceiverResponseReceived {
+        address: String,
+        data: Vec<u8>,
+    },
+    ReceiverResponseHandled {
+        address: String,
+        data: Vec<u8>,
+    },
+    PeerDisconnected {
+        account_id: String,
+    },
+    DataExpired {
+        multi_id: String,
+        data: Vec<u8>,
+    },
+    PendingTransactionsFetched {
+        address: String,
+        transactions: Vec<TxStateMachine>,
+    },
+    TxSubmitted {
+        address: String,
+        data: Vec<u8>,
+    },
 }
 
 impl BackendEvent {

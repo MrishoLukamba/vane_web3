@@ -80,6 +80,7 @@ function requireWorker(): PublicInterfaceWorkerJs {
   return nodeWorker;
 }
 
+
 export function isInitialized(): boolean {
   return nodeWorker !== null;
 }
@@ -123,6 +124,15 @@ export async function senderConfirm(tx: TxStateMachine): Promise<void> {
 
 export async function receiverConfirm(tx: TxStateMachine): Promise<void> {
   await requireWorker().receiverConfirm(tx);
+}
+
+/**
+ * Verify transaction call payload integrity
+ * @param tx - Transaction state machine to verify
+ * @returns Promise that resolves when verification succeeds, rejects on failure
+ */
+export async function verifyTxCallPayload(tx: TxStateMachine): Promise<void> {
+  await requireWorker().verifyTxCallPayload(tx);
 }
 
 export async function revertTransaction(tx: TxStateMachine, reason?: RevertReason): Promise<void> {
@@ -173,10 +183,25 @@ export async function clearFinalizedFromCache(): Promise<void> {
   await requireWorker().clearFinalizedFromCache();
 }
 
+export async function clearCache(): Promise<void> {
+  await requireWorker().clearCache();
+}
+
 export async function deleteTxInCache(tx: TxStateMachine): Promise<void> {
   await requireWorker().deleteTxInCache(tx);
 }
 
+export async function resetNode(): Promise<void> {
+  const w = nodeWorker;
+  nodeWorker = null; // 🔑 detach immediately, no matter what
+
+  if (!w) return;
+
+  // Best-effort cleanup — MUST NOT throw
+  try { await w.unsubscribeWatchTxUpdates(); } catch {}
+  try { await w.unsubscribeWatchP2pNotifications(); } catch {}
+  try { await w.clearCache(); } catch {}
+}
 export function getWorker(): PublicInterfaceWorkerJs | null {
   return nodeWorker;
 }
@@ -191,6 +216,7 @@ const VaneWeb3 = {
   initiateTransaction,
   senderConfirm,
   receiverConfirm,
+  verifyTxCallPayload,
   revertTransaction,
   watchTxUpdates,
   watchP2pNotifications,

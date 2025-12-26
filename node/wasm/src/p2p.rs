@@ -1,5 +1,3 @@
-
-
 use alloc::{format, rc::Rc, string::String};
 use core::cell::RefCell;
 
@@ -8,10 +6,9 @@ use futures::FutureExt;
 use futures::StreamExt;
 use gloo_timers::future::TimeoutFuture;
 
-
-use jsonrpsee::wasm_client::{Client, WasmClientBuilder};
 use jsonrpsee::core::client::{ClientT, SubscriptionClientT};
 use jsonrpsee::core::rpc_params;
+use jsonrpsee::wasm_client::{Client, WasmClientBuilder};
 use log::{debug, error, info, trace, warn};
 use serde_json;
 
@@ -81,10 +78,7 @@ impl WasmP2pWorker {
         wasm_bindgen_futures::spawn_local(async move {
             loop {
                 // Try to connect
-                let jsonrpc_client = match WasmClientBuilder::default()
-                    .build(&backend_url)
-                    .await
-                {
+                let jsonrpc_client = match WasmClientBuilder::default().build(&backend_url).await {
                     Ok(client) => {
                         info!(target: "p2p", "Connected to backend at: {}", backend_url);
                         client
@@ -144,7 +138,7 @@ impl WasmP2pWorker {
                                                 }
                                             }
                                         }
-                                        
+
                                         BackendEvent::ReceiverResponseHandled { address: _, data } => {
                                             if let Ok(tx_state) = serde_json::from_slice::<TxStateMachine>(&data) {
                                                 if tx_state.sender_address == user_account_id {
@@ -157,7 +151,7 @@ impl WasmP2pWorker {
                                         }
                                         BackendEvent::PendingTransactionsFetched { address, transactions } => {
                                             let pending_txs_msg = SwarmMessage::PendingTransactionsFetched { address,transactions };
-                                            
+
                                             if let Err(e) = sender.borrow_mut().send(Ok(pending_txs_msg)).await {
                                                 error!(target: "p2p", "Failed to send pending transactions message: {}", e);
                                             }
@@ -253,10 +247,10 @@ impl WasmP2pWorker {
                                             }
                                             Err(e) => {
                                                 error!(target: "p2p", "Failed to fetch pending transactions: {}", e);
-                                            }   
+                                            }
                                         }
                                     });
-                                }   
+                                }
                                 Some(NetworkCommand::ConfirmTransaction { account_id, data }) => {
                                     let client = client_clone.clone();
                                     let account_id_clone = account_id.clone();
