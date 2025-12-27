@@ -8,9 +8,11 @@ use core::hash::{Hash, Hasher};
 use libp2p::request_response::{InboundRequestId, OutboundRequestId, ResponseChannel};
 use libp2p::{Multiaddr, PeerId};
 use serde::de::Error as SerdeError;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use twox_hash::XxHash64;
+use std::fmt::Debug;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::{JsError, JsValue};
 
@@ -414,6 +416,55 @@ pub enum ChainTransactionType {
         bnb_legacy_tx_fields: UnsignedBnbLegacy,
     },
 }
+pub trait TxStateMachineLike:
+    Encode
+    + Decode
+    + Debug
+    + Clone
+    + PartialEq
+    + Serialize
+    + DeserializeOwned
+{
+}
+
+impl<T> TxStateMachineLike for T
+where
+    T: Encode
+        + Decode
+        + Debug
+        + Clone
+        + PartialEq
+        + Serialize
+        + DeserializeOwned,
+{
+}
+
+pub type SignatureType = Vec<u8>;
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+pub struct VanePayload<D, E>
+where
+    D: TxStateMachineLike + DeserializeOwned,  // Add explicit DeserializeOwned bound
+    E: Encode
+        + Decode
+        + Debug
+        + Clone
+        + PartialEq
+        + Serialize
+        + DeserializeOwned,
+{
+    pub data: D,
+    pub extra_data: E,
+}
+
+impl<D, E> VanePayload<D, E>
+where
+    D: TxStateMachineLike + DeserializeOwned,
+    E: Encode + Decode + Debug + Clone + PartialEq + Serialize + DeserializeOwned,
+{
+    pub fn new(data: D, extra_data: E) -> Self {
+        Self { data, extra_data }
+    }
+}
 
 #[cfg(feature = "wasm")]
 impl TxStateMachine {
@@ -541,10 +592,10 @@ pub enum NetworkCommand {
         channel: ResponseChannel<Result<Vec<u8>, Error>>,
     },
     WasmSendRequest {
-        request: TxStateMachine,
+        request: VanePayload<TxStateMachine, SignatureType>,
     },
     WasmSendResponse {
-        response: Result<TxStateMachine, String>,
+        response: Result<VanePayload<TxStateMachine, SignatureType>, String>,
     },
     Dial {
         target_multi_addr: Multiaddr,
@@ -560,17 +611,21 @@ pub enum NetworkCommand {
         value: String,
     },
     FetchPendingTransactions {
+        sig: SignatureType,
         account_id: String,
     },
     RevertTransaction {
+        sig: SignatureType,
         account_id: String,
         data: TxStateMachine,
     },
     ConfirmTransaction {
+        sig: SignatureType,
         account_id: String,
         data: TxStateMachine,
     },
     TxSubmissionUpdate {
+        sig: SignatureType,
         account_id: String,
         data: TxStateMachine,
     },

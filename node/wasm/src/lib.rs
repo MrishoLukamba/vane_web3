@@ -27,6 +27,7 @@ use lru::LruCache;
 use primitives::data_structure::{
     BackendEvent, ChainSupported, DbTxStateMachine, DbWorkerInterface, NetworkCommand,
     StorageExport, SwarmMessage, TtlWrapper, TxStateMachine, TxStatus, UserAccount,
+    VanePayload, SignatureType,
 };
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 use wasm_timer::TryFutureExt;
@@ -45,7 +46,7 @@ pub struct WasmMainServiceWorker {
     pub rpc_sender_channel: Rc<RefCell<tokio_with_wasm::alias::sync::mpsc::Sender<TxStateMachine>>>,
     /// receiver channel to handle the updates made by user from rpc
     pub user_rpc_update_recv_channel:
-        Rc<RefCell<tokio_with_wasm::alias::sync::mpsc::Receiver<TxStateMachine>>>,
+        Rc<RefCell<tokio_with_wasm::alias::sync::mpsc::Receiver<VanePayload<TxStateMachine, SignatureType>>>>,
     // moka cache
     pub lru_cache: Rc<RefCell<LruCache<u32, TtlWrapper<TxStateMachine>>>>,
 }
@@ -151,7 +152,7 @@ impl WasmMainServiceWorker {
         })
     }
 
-    pub fn start_swarm_handler(&self) -> Result<(), Error> {
+    pub fn start_swarm_handler(&self, sig: SignatureType) -> Result<(), Error> {
         let (sender_channel, mut recv_channel) = tokio_with_wasm::alias::sync::mpsc::channel(256);
 
         // Start network worker and get it ready to send messages
@@ -159,7 +160,7 @@ impl WasmMainServiceWorker {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = p2p_worker_clone
                 .borrow()
-                .start(Rc::new(RefCell::new(sender_channel)))
+                .start(sig, Rc::new(RefCell::new(sender_channel)))
                 .await
             {
                 error!("start network worker failed: {}", e);
@@ -224,7 +225,7 @@ impl WasmMainServiceWorker {
                     // sender receives the response from the receiver
                     let mut decoded_resp: TxStateMachine = data;
 
-                    info!(target: "MainServiceWorker", "Received response from relay network status: {:?}", decoded_resp.status);
+                    info!(target: "MainServiceWorker", "Received response from relay network; tx status: {:?}", decoded_resp.status);
                     // Drop updates if already reverted in cache (authoritative sender state)
                     if let Some(existing) = self
                         .lru_cache
@@ -271,16 +272,6 @@ impl WasmMainServiceWorker {
                         }
                     }
 
-                    if let Err(e) = self
-                        .rpc_sender_channel
-                        .borrow_mut()
-                        .try_send(decoded_resp.clone())
-                    {
-                        //handle this error on the error worker
-                        error!("Failed to send response to RPC channel: {}", e);
-                        return Err(e.into());
-                    }
-
                     {
                         let mut cache = self.lru_cache.borrow_mut();
                         if let Some(ttl_wrapper) = cache.get_mut(&decoded_resp.tx_nonce.into()) {
@@ -308,15 +299,6 @@ impl WasmMainServiceWorker {
                                 .await?;
                             return Ok(());
                         }
-                    }
-
-                    let confirm_command = NetworkCommand::ConfirmTransaction {
-                        account_id: decoded_resp.sender_address.clone(),
-                        data: decoded_resp.clone(),
-                    };
-                    let command_tx = self.p2p_network_service.borrow().p2p_command_tx.clone();
-                    if let Err(e) = command_tx.send(confirm_command).await {
-                        error!("Failed to send confirm transaction to server: {}", e);
                     }
 
                     debug!(target: "MainServiceWorker",
@@ -364,7 +346,7 @@ impl WasmMainServiceWorker {
 
     pub async fn handle_genesis_tx_state(
         &mut self,
-        txn: Rc<RefCell<TxStateMachine>>,
+        txn: Rc<RefCell<VanePayload<TxStateMachine, SignatureType>>>,
     ) -> Result<(), Error> {
         let db = self.db_worker.clone();
         let rpc_sender_channel = self.rpc_sender_channel.clone();
@@ -372,34 +354,38 @@ impl WasmMainServiceWorker {
 
         let target_user_profile = db.get_user_account().await?;
         let (receiver_in_profile, sender_in_profile) = {
-            let txn_borrow = txn.borrow();
+            let vane_payload = txn.borrow();
+
             let receiver_in_profile = target_user_profile
                 .accounts
                 .iter()
-                .any(|(acc, _)| *acc == txn_borrow.receiver_address);
+                .any(|(acc, _)| *acc == vane_payload.data.receiver_address);
             let sender_in_profile = target_user_profile
                 .accounts
                 .iter()
-                .any(|(acc, _)| *acc == txn_borrow.sender_address);
+                .any(|(acc, _)| *acc == vane_payload.data.sender_address);
             (receiver_in_profile, sender_in_profile)
         };
 
         if receiver_in_profile && sender_in_profile {
             info!(target: "MainServiceWorker", "receiver and sender are in profile");
+            let vane_payload = txn.borrow();
             let mut ttl_wrapper = lru_cache
                 .borrow_mut()
-                .get(&txn.borrow().tx_nonce.into())
+                .get(&vane_payload.data.tx_nonce.into())
                 .ok_or(anyhow::anyhow!(" Failed get transaction from cache"))?
                 .clone();
-            ttl_wrapper.update_value(txn.borrow().clone());
+            ttl_wrapper.update_value(vane_payload.data.clone());
+
             lru_cache
                 .borrow_mut()
-                .push(txn.borrow().tx_nonce.into(), ttl_wrapper);
+                .push(vane_payload.data.tx_nonce.into(), ttl_wrapper);
 
             rpc_sender_channel
                 .borrow_mut()
-                .send(txn.borrow().clone())
+                .send(vane_payload.data.clone())
                 .await?;
+
             return Ok(());
         }
 
@@ -415,37 +401,42 @@ impl WasmMainServiceWorker {
 
     pub async fn handle_recv_addr_confirmed_tx_state(
         &self,
-        txn: Rc<RefCell<TxStateMachine>>,
+        txn: Rc<RefCell<VanePayload<TxStateMachine, SignatureType>>>,
     ) -> Result<(), Error> {
         let target_user_profile = self.db_worker.get_user_account().await?;
         let (receiver_in_profile, sender_in_profile) = {
-            let txn_borrow = txn.borrow();
+            let vane_payload = txn.borrow();
             let receiver_in_profile = target_user_profile
                 .accounts
                 .iter()
-                .any(|(acc, _)| *acc == txn_borrow.receiver_address);
+                .any(|(acc, _)| *acc == vane_payload.data.receiver_address);
             let sender_in_profile = target_user_profile
                 .accounts
                 .iter()
-                .any(|(acc, _)| *acc == txn_borrow.sender_address);
+                .any(|(acc, _)| *acc == vane_payload.data.sender_address);
             (receiver_in_profile, sender_in_profile)
         };
 
         let is_local_tx = receiver_in_profile && sender_in_profile;
 
         if !is_local_tx {
-            let mut txn_inner = txn.borrow().clone();
+
+            let vane_payload = txn.borrow().clone();
+            let mut txn_inner = vane_payload.data.clone();
             self.lru_cache.borrow_mut().pop(&txn_inner.tx_nonce.into());
             info!(target: "MainServiceWorker", "Transaction Status before sending to relay network: {:?}", txn_inner.status);
             info!(target: "MainServiceWorker", "Sending response to relay network");
+            
             self.p2p_network_service
                 .borrow_mut()
-                .wasm_send_response(Rc::new(RefCell::new(txn_inner)))
+                .wasm_send_response(Rc::new(RefCell::new(vane_payload)))
                 .await?;
+
             return Ok(());
         }
 
-        let mut txn_inner = txn.borrow().clone();
+        let vane_payload = txn.borrow().clone();
+        let mut txn_inner = vane_payload.data.clone();
         let validation_result = {
             let tx_processing = self.wasm_tx_processing_worker.borrow();
             tx_processing.validate_receiver_and_sender_address(&txn_inner, "Receiver")
@@ -493,9 +484,10 @@ impl WasmMainServiceWorker {
 
     pub async fn handle_sender_confirmed_tx_state(
         &self,
-        txn: Rc<RefCell<TxStateMachine>>,
+        txn: Rc<RefCell<VanePayload<TxStateMachine, SignatureType>>>,
     ) -> Result<(), Error> {
-        let mut txn_inner = txn.borrow_mut().clone();
+        let vane_payload = txn.borrow();
+        let mut txn_inner = vane_payload.data.clone();
         info!(target: "MainServiceWorker","sender confirmed tx state: {txn_inner:?}");
 
         // If the receiver is remote, notify backend to handle confirmation
@@ -629,6 +621,7 @@ impl WasmMainServiceWorker {
             txn_inner.sender_confirmation_failed();
 
             let confirm_command = NetworkCommand::ConfirmTransaction {
+                sig: vane_payload.extra_data.clone(),
                 account_id: txn_inner.sender_address.clone(),
                 data: txn_inner.clone(),
             };
@@ -682,6 +675,7 @@ impl WasmMainServiceWorker {
                     self.db_worker.update_success_tx(db_tx).await?;
 
                     let submission_update_cmd = NetworkCommand::TxSubmissionUpdate {
+                        sig: vane_payload.extra_data.clone(),
                         account_id: txn_inner.sender_address.clone(),
                         data: txn_inner.clone(),
                     };
@@ -719,6 +713,7 @@ impl WasmMainServiceWorker {
                     txn_inner.tx_submission_failed("Failed to submit transaction".to_string());
 
                     let submission_update_cmd = NetworkCommand::TxSubmissionUpdate {
+                        sig: vane_payload.extra_data.clone(),
                         account_id: txn_inner.sender_address.clone(),
                         data: txn_inner.clone(),
                     };
@@ -756,6 +751,7 @@ impl WasmMainServiceWorker {
             error!(target: "MainServiceWorker","Non original sender or receiver signed");
 
             let confirm_command = NetworkCommand::ConfirmTransaction {
+                sig: vane_payload.extra_data.clone(),
                 account_id: txn_inner.sender_address.clone(),
                 data: txn_inner.clone(),
             };
@@ -804,9 +800,10 @@ impl WasmMainServiceWorker {
 
     pub async fn handle_reverted_tx_state(
         &self,
-        txn: Rc<RefCell<TxStateMachine>>,
+        txn: Rc<RefCell<VanePayload<TxStateMachine, SignatureType>>>,
     ) -> Result<(), Error> {
-        let txn_inner = txn.borrow().clone();
+        let vane_payload = txn.borrow();
+        let txn_inner = vane_payload.data.clone();
         info!(target:"MainServiceWorker","revert for tx {:?} ({:?})", txn_inner.tx_nonce, txn_inner.status);
 
         // Both ends in this profile?
@@ -824,6 +821,7 @@ impl WasmMainServiceWorker {
 
         if !both_in_profile {
             let revert_command = NetworkCommand::RevertTransaction {
+                sig: vane_payload.extra_data.clone(),
                 account_id: txn_inner.sender_address.clone(),
                 data: txn_inner.clone(),
             };
@@ -873,25 +871,25 @@ impl WasmMainServiceWorker {
     }
 
     pub async fn handle_public_interface_tx_updates(&mut self) -> Result<(), anyhow::Error> {
-        while let Some(txn) = {
+        while let Some(vane_payload) = {
             let mut receiver = self.user_rpc_update_recv_channel.borrow_mut();
             receiver.recv().await
         } {
             // handle the incoming transaction per its state
-            let status = txn.status.clone();
+            let status = vane_payload.data.status.clone();
             match status {
                 TxStatus::Genesis => {
                     info!(target:"MainServiceWorker","handling incoming genesis tx updates");
-                    debug!(target:"MainServiceWorker","handling incoming genesis tx updates: {:?}",txn.clone());
-                    self.handle_genesis_tx_state(Rc::new(RefCell::new(txn.clone())))
+                    debug!(target:"MainServiceWorker","handling incoming genesis tx updates: {:?}",vane_payload.clone());
+                    self.handle_genesis_tx_state(Rc::new(RefCell::new(vane_payload.clone())))
                         .await?;
                 }
 
                 TxStatus::RecvAddrConfirmed => {
                     info!(target:"MainServiceWorker","handling incoming receiver addr-confirmation tx updates");
-                    debug!(target:"MainServiceWorker","handling incoming receiver addr-confirmation tx updates: {:?}",txn.clone());
+                    debug!(target:"MainServiceWorker","handling incoming receiver addr-confirmation tx updates: {:?}",vane_payload.clone());
 
-                    self.handle_recv_addr_confirmed_tx_state(Rc::new(RefCell::new(txn.clone())))
+                    self.handle_recv_addr_confirmed_tx_state(Rc::new(RefCell::new(vane_payload.clone())))
                         .await?;
                 }
 
@@ -903,17 +901,17 @@ impl WasmMainServiceWorker {
                 | TxStatus::FailedToSubmitTxn(_)
                 | TxStatus::TxSubmissionPassed { hash: _ } => {
                     info!(target:"MainServiceWorker","handling incoming sender addr-confirmed tx updates");
-                    debug!(target:"MainServiceWorker","handling incoming sender addr-confirmed tx updates: {:?}",txn.clone());
+                    debug!(target:"MainServiceWorker","handling incoming sender addr-confirmed tx updates: {:?}",vane_payload.clone());
 
-                    self.handle_sender_confirmed_tx_state(Rc::new(RefCell::new(txn.clone())))
+                    self.handle_sender_confirmed_tx_state(Rc::new(RefCell::new(vane_payload.clone())))
                         .await?;
                 }
 
                 TxStatus::Reverted(_) => {
                     info!(target:"MainServiceWorker","handling incoming reverted tx updates");
-                    debug!(target:"MainServiceWorker","handling incoming reverted tx updates: {:?}",txn.clone());
+                    debug!(target:"MainServiceWorker","handling incoming reverted tx updates: {:?}",vane_payload.clone());
 
-                    self.handle_reverted_tx_state(Rc::new(RefCell::new(txn.clone())))
+                    self.handle_reverted_tx_state(Rc::new(RefCell::new(vane_payload.clone())))
                         .await?;
                 }
 
@@ -924,6 +922,7 @@ impl WasmMainServiceWorker {
     }
 
     pub async fn run(
+        sig: SignatureType,
         relay_node_multi_addr: String,
         account: String,
         network: String,
@@ -934,7 +933,7 @@ impl WasmMainServiceWorker {
         info!("\n🔥 =========== Vane Web3 =========== 🔥\n");
 
         // ====================================================================================== //
-        let main_worker = Self::new(relay_node_multi_addr, account, network, live, storage).await?;
+        let main_worker = Self::new( relay_node_multi_addr, account, network, live, storage).await?;
 
         // ====================================================================================== //
 
@@ -977,7 +976,7 @@ impl WasmMainServiceWorker {
         });
 
         if !self_node {
-            let swarm_handler_future = async move { main_worker.start_swarm_handler() };
+            let swarm_handler_future = async move { main_worker.start_swarm_handler(sig) };
 
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(err) = swarm_handler_future.await {
@@ -1025,6 +1024,7 @@ impl WasmMainServiceWorker {
 
 #[wasm_bindgen]
 pub async fn start_vane_web3(
+    sig: SignatureType,
     relay_node_multi_addr: String,
     account: String,
     network: String,
@@ -1048,6 +1048,7 @@ pub async fn start_vane_web3(
     log::debug!("Rust debug log test from inside WASM");
 
     match WasmMainServiceWorker::run(
+        sig,
         relay_node_multi_addr,
         account,
         network,

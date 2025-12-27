@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use hex;
+use sp_runtime::traits::Verify;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -35,10 +36,13 @@ use tokio::{
     net::TcpListener,
     sync::{broadcast, mpsc, Mutex},
 };
+use std::env;
 
 pub type Data = Vec<u8>;
 
 const REQUEST_TTL_SECONDS: u64 = 60 * 30;
+
+
 
 struct RequestEntry {
     data: Data,
@@ -105,6 +109,33 @@ pub struct TargetPeer {
     times_requested: u16,
 }
 pub type TargetPeers = HashMap<String, TargetPeer>;
+
+
+pub fn verify_client_key_middleware(
+    sig: Vec<u8>,
+    msg: String,
+) -> Result<bool, anyhow::Error> {
+    use std::env;
+    use anyhow::anyhow;
+    use sp_core::sr25519;
+
+    let address = env::var("VANE_PUBLIC_KEY")
+        .expect("VANE_PUBLIC_KEY must be set");
+
+    let pub_bytes: [u8; 32] = hex::decode(address)?
+        .try_into()
+        .map_err(|_| anyhow!("Invalid public key length"))?;
+    let public = sr25519::Public::from_raw(pub_bytes);
+
+    let sig_bytes: [u8; 64] = sig
+        .try_into()
+        .map_err(|_| anyhow!("Invalid signature length"))?;
+    let signature = sr25519::Signature::from_raw(sig_bytes);
+
+    Ok(signature.verify(msg.as_bytes(), &public))
+}
+
+
 
 pub struct VaneSwarmServer {
     peers: HashMap<String, TargetPeers>,
@@ -182,6 +213,7 @@ impl VaneSwarmServer {
         Ok(())
     }
 
+   
     fn cleanup_expired_requests(&self) {
         let mut expired_keys = Vec::new();
         for entry in self.requests.iter() {
@@ -852,7 +884,7 @@ pub trait BackendRpc {
     /// - `address`: The sender address
     /// - `data`: Request data (TxStateMachine encoded as JSON bytes)
     #[method(name = "handleSenderRequest")]
-    async fn handle_sender_request(&self, address: String, data: Vec<u8>) -> RpcResult<()>;
+    async fn handle_sender_request(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()>;
 
     /// Handle receiver response
     /// params:
@@ -860,7 +892,7 @@ pub trait BackendRpc {
     /// - `address`: The receiver address
     /// - `data`: Response data
     #[method(name = "handleReceiverResponse")]
-    async fn handle_receiver_response(&self, address: String, data: Vec<u8>) -> RpcResult<()>;
+    async fn handle_receiver_response(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()>;
 
     /// Handle sender confirmation
     ///  params:
@@ -868,7 +900,7 @@ pub trait BackendRpc {
     /// - `address`: The sender address
     /// - `data`: updated TxStateMachine
     #[method(name = "handleSenderConfirmation")]
-    async fn handle_sender_confirmation(&self, address: String, data: Vec<u8>) -> RpcResult<()>;
+    async fn handle_sender_confirmation(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()>;
 
     /// Handle sender reveration
     ///  params:
@@ -876,7 +908,7 @@ pub trait BackendRpc {
     /// - `address`: The sender address
     /// - `data`: updated TxStateMachine
     #[method(name = "handleSenderRevertation")]
-    async fn handle_sender_revertation(&self, address: String, data: Vec<u8>) -> RpcResult<()>;
+    async fn handle_sender_revertation(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()>;
 
     /// Handle tx submission updates
     /// params:
@@ -884,21 +916,21 @@ pub trait BackendRpc {
     /// - `address`: The sender address
     /// - `data`: updated TxStateMachinexf
     #[method(name = "handleTxSubmissionUpdates")]
-    async fn handle_tx_submission_updates(&self, address: String, data: Vec<u8>) -> RpcResult<()>;
+    async fn handle_tx_submission_updates(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()>;
 
     /// Fetch pending transactions
     /// params:
     ///
     /// - `address`: The address to fetch pending transactions for
     #[method(name = "fetchPendingTransactions")]
-    async fn fetch_pending_transactions(&self, address: String) -> RpcResult<()>;
+    async fn fetch_pending_transactions(&self, sig: Vec<u8>, address: String) -> RpcResult<()>;
 
     /// Subscribe to events filtered by address
     /// params:
     ///
     /// - `address`: The address to filter events for
     #[subscription(name = "subscribeToEvents", item = BackendEvent)]
-    async fn subscribe_to_events(&self, address: String) -> SubscriptionResult;
+    async fn subscribe_to_events(&self, address: String,  sig: Vec<u8>) -> SubscriptionResult;
 }
 
 #[derive(Clone)]
@@ -921,7 +953,15 @@ impl BackendRpcHandler {
 
 #[async_trait]
 impl BackendRpcServer for BackendRpcHandler {
-    async fn handle_sender_request(&self, address: String, data: Vec<u8>) -> RpcResult<()> {
+    async fn handle_sender_request(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()> {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()));
+        }
+
         info!("RPC: handle_sender_request called for address: {}", address);
         let mut server = self.swarm_server.lock().await;
         server
@@ -934,7 +974,15 @@ impl BackendRpcServer for BackendRpcHandler {
         Ok(())
     }
 
-    async fn handle_receiver_response(&self, address: String, data: Vec<u8>) -> RpcResult<()> {
+    async fn handle_receiver_response(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()> {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()));
+        }
+
         info!(
             "RPC: handle_receiver_response called for address: {}",
             address
@@ -950,7 +998,15 @@ impl BackendRpcServer for BackendRpcHandler {
         Ok(())
     }
 
-    async fn handle_sender_confirmation(&self, address: String, data: Vec<u8>) -> RpcResult<()> {
+    async fn handle_sender_confirmation(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()> {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()));
+        }
+
         info!(
             "RPC: handle_sender_confirmation called for address: {}",
             address
@@ -966,7 +1022,15 @@ impl BackendRpcServer for BackendRpcHandler {
         Ok(())
     }
 
-    async fn handle_sender_revertation(&self, address: String, data: Vec<u8>) -> RpcResult<()> {
+    async fn handle_sender_revertation(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()> {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()));
+        }
+
         info!(
             "RPC: handle_sender_revertation called for address: {}",
             address
@@ -982,7 +1046,15 @@ impl BackendRpcServer for BackendRpcHandler {
         Ok(())
     }
 
-    async fn handle_tx_submission_updates(&self, address: String, data: Vec<u8>) -> RpcResult<()> {
+    async fn handle_tx_submission_updates(&self, sig: Vec<u8>, address: String, data: Vec<u8>) -> RpcResult<()> {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()));
+        }
+
         info!(
             "RPC: handle_tx_submission_updates called for address: {}",
             address
@@ -998,7 +1070,15 @@ impl BackendRpcServer for BackendRpcHandler {
         Ok(())
     }
 
-    async fn fetch_pending_transactions(&self, address: String) -> RpcResult<()> {
+    async fn fetch_pending_transactions(&self, sig: Vec<u8>, address: String) -> RpcResult<()> {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()));
+        }
+
         info!(
             "RPC: fetch_pending_transactions called for address: {}",
             address
@@ -1025,7 +1105,16 @@ impl BackendRpcServer for BackendRpcHandler {
         &self,
         pending: PendingSubscriptionSink,
         address: String,
+        sig: Vec<u8>
     ) -> SubscriptionResult {
+
+        let is_valid = verify_client_key_middleware(sig, address.clone()).map_err(|e| {
+            jsonrpsee::core::Error::Custom(e.to_string())
+        })?;
+        if !is_valid {
+            return Err(jsonrpsee::core::Error::Custom("Invalid client verification".to_string()).into());
+        }
+
         info!("RPC: subscribe_to_events called for address: {}", address);
         let sink = pending.accept().await.map_err(|e| {
             error!(

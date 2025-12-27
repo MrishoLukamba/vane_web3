@@ -12,7 +12,7 @@ use jsonrpsee::wasm_client::{Client, WasmClientBuilder};
 use log::{debug, error, info, trace, warn};
 use serde_json;
 
-use primitives::data_structure::{BackendEvent, NetworkCommand, SwarmMessage, TxStateMachine};
+use primitives::data_structure::{BackendEvent, NetworkCommand, SwarmMessage, TxStateMachine, SignatureType, VanePayload};
 
 #[derive(Clone)]
 pub struct P2pEventNotifSubSystem {
@@ -65,6 +65,7 @@ impl WasmP2pWorker {
 
     pub async fn start(
         &self,
+        sig: SignatureType,
         sender_channel: Rc<
             RefCell<tokio_with_wasm::alias::sync::mpsc::Sender<Result<SwarmMessage, Error>>>,
         >,
@@ -95,7 +96,7 @@ impl WasmP2pWorker {
                     match jsonrpc_client
                         .subscribe(
                             "subscribeToEvents",
-                            rpc_params![user_account_id.clone()],
+                            rpc_params![user_account_id.clone(), sig.clone()],
                             "unsubscribe_subscribeToEvents",
                         )
                         .await
@@ -173,8 +174,10 @@ impl WasmP2pWorker {
                             match cmd {
                                 Some(NetworkCommand::WasmSendRequest { request }) => {
                                     let client = client_clone.clone();
-                                    let address = request.sender_address.clone();
-                                    let data = match serde_json::to_vec(&request) {
+                                    let sig = request.extra_data.clone();
+                                    let data = request.data.clone();
+                                    let address = data.sender_address.clone();
+                                    let data = match serde_json::to_vec(&data) {
                                         Ok(data) => data,
                                         Err(e) => {
                                             error!(target: "p2p", "Failed to serialize request: {}", e);
@@ -186,7 +189,7 @@ impl WasmP2pWorker {
                                         match client
                                             .request::<(), _>(
                                                 "handleSenderRequest",
-                                                rpc_params![address.clone(), data],
+                                                rpc_params![sig, address.clone(), data],
                                             )
                                             .await
                                         {
@@ -201,8 +204,11 @@ impl WasmP2pWorker {
                                 }
                                 Some(NetworkCommand::WasmSendResponse { response }) => {
                                     let client = client_clone.clone();
+
                                     match response {
-                                        Ok(tx_state) => {
+                                        Ok(vane_payload) => {
+                                            let tx_state = vane_payload.data.clone();
+                                            let sig = vane_payload.extra_data.clone();
                                             let address = tx_state.receiver_address.clone();
                                             let data = match serde_json::to_vec(&tx_state) {
                                                 Ok(data) => data,
@@ -216,7 +222,7 @@ impl WasmP2pWorker {
                                                 match client
                                                     .request::<(), _>(
                                                         "handleReceiverResponse",
-                                                        rpc_params![address.clone(), data],
+                                                        rpc_params![sig, address.clone(), data],
                                                     )
                                                     .await
                                                 {
@@ -234,12 +240,12 @@ impl WasmP2pWorker {
                                         }
                                     }
                                 }
-                                Some(NetworkCommand::FetchPendingTransactions { account_id }) => {
+                                Some(NetworkCommand::FetchPendingTransactions { sig, account_id }) => {
                                     let client = client_clone.clone();
                                     let account_id_clone = account_id.clone();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match client
-                                            .request::<(), _>("fetchPendingTransactions", rpc_params![account_id_clone])
+                                            .request::<(), _>("fetchPendingTransactions", rpc_params![sig, account_id_clone])
                                             .await
                                         {
                                             Ok(_) => {
@@ -251,7 +257,7 @@ impl WasmP2pWorker {
                                         }
                                     });
                                 }
-                                Some(NetworkCommand::ConfirmTransaction { account_id, data }) => {
+                                Some(NetworkCommand::ConfirmTransaction { sig, account_id, data }) => {
                                     let client = client_clone.clone();
                                     let account_id_clone = account_id.clone();
                                     let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -260,7 +266,7 @@ impl WasmP2pWorker {
                                         match client
                                             .request::<(), _>(
                                                 "handleSenderConfirmation",
-                                                rpc_params![account_id_clone, data_bytes],
+                                                rpc_params![sig, account_id_clone, data_bytes],
                                             )
                                             .await
                                         {
@@ -273,7 +279,7 @@ impl WasmP2pWorker {
                                         }
                                     });
                                 }
-                                Some(NetworkCommand::TxSubmissionUpdate { account_id, data }) => {
+                                Some(NetworkCommand::TxSubmissionUpdate { sig, account_id, data }) => {
                                     let client = client_clone.clone();
                                     let account_id_clone = account_id.clone();
                                     let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -282,7 +288,7 @@ impl WasmP2pWorker {
                                         match client
                                             .request::<(), _>(
                                                 "handleTxSubmissionUpdates",
-                                                rpc_params![account_id_clone, data_bytes],
+                                                rpc_params![sig, account_id_clone, data_bytes],
                                             )
                                             .await
                                         {
@@ -295,7 +301,7 @@ impl WasmP2pWorker {
                                         }
                                     });
                                 }
-                                Some(NetworkCommand::RevertTransaction { account_id, data }) => {
+                                Some(NetworkCommand::RevertTransaction { sig, account_id, data }) => {
                                     let client = client_clone.clone();
                                     let account_id_clone = account_id.clone();
                                     let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -304,7 +310,7 @@ impl WasmP2pWorker {
                                         match client
                                             .request::<(), _>(
                                                 "handleSenderRevertation",
-                                                rpc_params![account_id_clone, data_bytes],
+                                                rpc_params![sig, account_id_clone, data_bytes],
                                             )
                                             .await
                                         {
@@ -349,7 +355,7 @@ impl P2pNetworkService {
 
     pub async fn wasm_send_request(
         &mut self,
-        request: Rc<RefCell<TxStateMachine>>,
+        request: Rc<RefCell<VanePayload<TxStateMachine, SignatureType>>>,
     ) -> Result<(), Error> {
         let req = request.borrow().clone();
 
@@ -366,7 +372,7 @@ impl P2pNetworkService {
 
     pub async fn wasm_send_response(
         &mut self,
-        response: Rc<RefCell<TxStateMachine>>,
+        response: Rc<RefCell<VanePayload<TxStateMachine, SignatureType>>>,
     ) -> Result<(), anyhow::Error> {
         let txn_state = response.borrow().clone();
 
