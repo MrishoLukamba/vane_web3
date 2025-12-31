@@ -7,12 +7,12 @@ use codec::{Decode, Encode};
 use core::hash::{Hash, Hasher};
 use libp2p::request_response::{InboundRequestId, OutboundRequestId, ResponseChannel};
 use libp2p::{Multiaddr, PeerId};
-use serde::de::Error as SerdeError;
 use serde::de::DeserializeOwned;
+use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use twox_hash::XxHash64;
 use std::fmt::Debug;
+use twox_hash::XxHash64;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::{JsError, JsValue};
 
@@ -417,25 +417,12 @@ pub enum ChainTransactionType {
     },
 }
 pub trait TxStateMachineLike:
-    Encode
-    + Decode
-    + Debug
-    + Clone
-    + PartialEq
-    + Serialize
-    + DeserializeOwned
+    Encode + Decode + Debug + Clone + PartialEq + Serialize + DeserializeOwned
 {
 }
 
-impl<T> TxStateMachineLike for T
-where
-    T: Encode
-        + Decode
-        + Debug
-        + Clone
-        + PartialEq
-        + Serialize
-        + DeserializeOwned,
+impl<T> TxStateMachineLike for T where
+    T: Encode + Decode + Debug + Clone + PartialEq + Serialize + DeserializeOwned
 {
 }
 
@@ -443,14 +430,8 @@ pub type SignatureType = Vec<u8>;
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct VanePayload<D, E>
 where
-    D: TxStateMachineLike + DeserializeOwned,  // Add explicit DeserializeOwned bound
-    E: Encode
-        + Decode
-        + Debug
-        + Clone
-        + PartialEq
-        + Serialize
-        + DeserializeOwned,
+    D: TxStateMachineLike + DeserializeOwned, // Add explicit DeserializeOwned bound
+    E: Encode + Decode + Debug + Clone + PartialEq + Serialize + DeserializeOwned,
 {
     pub data: D,
     pub extra_data: E,

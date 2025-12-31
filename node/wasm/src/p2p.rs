@@ -12,7 +12,9 @@ use jsonrpsee::wasm_client::{Client, WasmClientBuilder};
 use log::{debug, error, info, trace, warn};
 use serde_json;
 
-use primitives::data_structure::{BackendEvent, NetworkCommand, SwarmMessage, TxStateMachine, SignatureType, VanePayload};
+use primitives::data_structure::{
+    BackendEvent, NetworkCommand, SignatureType, SwarmMessage, TxStateMachine, VanePayload,
+};
 
 #[derive(Clone)]
 pub struct P2pEventNotifSubSystem {
@@ -243,7 +245,9 @@ impl WasmP2pWorker {
                                 Some(NetworkCommand::FetchPendingTransactions { sig, account_id }) => {
                                     let client = client_clone.clone();
                                     let account_id_clone = account_id.clone();
+
                                     wasm_bindgen_futures::spawn_local(async move {
+
                                         match client
                                             .request::<(), _>("fetchPendingTransactions", rpc_params![sig, account_id_clone])
                                             .await

@@ -26,8 +26,8 @@ use log::{debug, error, info, warn};
 use lru::LruCache;
 use primitives::data_structure::{
     BackendEvent, ChainSupported, DbTxStateMachine, DbWorkerInterface, NetworkCommand,
-    StorageExport, SwarmMessage, TtlWrapper, TxStateMachine, TxStatus, UserAccount,
-    VanePayload, SignatureType,
+    SignatureType, StorageExport, SwarmMessage, TtlWrapper, TxStateMachine, TxStatus, UserAccount,
+    VanePayload,
 };
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 use wasm_timer::TryFutureExt;
@@ -45,8 +45,13 @@ pub struct WasmMainServiceWorker {
     /// this serve as an update channel to the user
     pub rpc_sender_channel: Rc<RefCell<tokio_with_wasm::alias::sync::mpsc::Sender<TxStateMachine>>>,
     /// receiver channel to handle the updates made by user from rpc
-    pub user_rpc_update_recv_channel:
-        Rc<RefCell<tokio_with_wasm::alias::sync::mpsc::Receiver<VanePayload<TxStateMachine, SignatureType>>>>,
+    pub user_rpc_update_recv_channel: Rc<
+        RefCell<
+            tokio_with_wasm::alias::sync::mpsc::Receiver<
+                VanePayload<TxStateMachine, SignatureType>,
+            >,
+        >,
+    >,
     // moka cache
     pub lru_cache: Rc<RefCell<LruCache<u32, TtlWrapper<TxStateMachine>>>>,
 }
@@ -420,13 +425,12 @@ impl WasmMainServiceWorker {
         let is_local_tx = receiver_in_profile && sender_in_profile;
 
         if !is_local_tx {
-
             let vane_payload = txn.borrow().clone();
             let mut txn_inner = vane_payload.data.clone();
             self.lru_cache.borrow_mut().pop(&txn_inner.tx_nonce.into());
             info!(target: "MainServiceWorker", "Transaction Status before sending to relay network: {:?}", txn_inner.status);
             info!(target: "MainServiceWorker", "Sending response to relay network");
-            
+
             self.p2p_network_service
                 .borrow_mut()
                 .wasm_send_response(Rc::new(RefCell::new(vane_payload)))
@@ -889,8 +893,10 @@ impl WasmMainServiceWorker {
                     info!(target:"MainServiceWorker","handling incoming receiver addr-confirmation tx updates");
                     debug!(target:"MainServiceWorker","handling incoming receiver addr-confirmation tx updates: {:?}",vane_payload.clone());
 
-                    self.handle_recv_addr_confirmed_tx_state(Rc::new(RefCell::new(vane_payload.clone())))
-                        .await?;
+                    self.handle_recv_addr_confirmed_tx_state(Rc::new(RefCell::new(
+                        vane_payload.clone(),
+                    )))
+                    .await?;
                 }
 
                 TxStatus::NetConfirmed => {
@@ -903,8 +909,10 @@ impl WasmMainServiceWorker {
                     info!(target:"MainServiceWorker","handling incoming sender addr-confirmed tx updates");
                     debug!(target:"MainServiceWorker","handling incoming sender addr-confirmed tx updates: {:?}",vane_payload.clone());
 
-                    self.handle_sender_confirmed_tx_state(Rc::new(RefCell::new(vane_payload.clone())))
-                        .await?;
+                    self.handle_sender_confirmed_tx_state(Rc::new(RefCell::new(
+                        vane_payload.clone(),
+                    )))
+                    .await?;
                 }
 
                 TxStatus::Reverted(_) => {
@@ -933,7 +941,7 @@ impl WasmMainServiceWorker {
         info!("\n🔥 =========== Vane Web3 =========== 🔥\n");
 
         // ====================================================================================== //
-        let main_worker = Self::new( relay_node_multi_addr, account, network, live, storage).await?;
+        let main_worker = Self::new(relay_node_multi_addr, account, network, live, storage).await?;
 
         // ====================================================================================== //
 

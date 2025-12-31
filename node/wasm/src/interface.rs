@@ -33,8 +33,8 @@ use crate::{
 
 use primitives::data_structure::{
     AccountInfo, BackendEvent, ChainSupported, ChainTransactionType, DbTxStateMachine,
-    DbWorkerInterface, NetworkCommand, StorageExport, Token, TtlWrapper, TxStateMachine, TxStatus,
-    UserAccount, UserMetrics, VanePayload, TxStateMachineLike, SignatureType
+    DbWorkerInterface, NetworkCommand, SignatureType, StorageExport, Token, TtlWrapper,
+    TxStateMachine, TxStateMachineLike, TxStatus, UserAccount, UserMetrics, VanePayload,
 };
 
 #[derive(Clone)]
@@ -48,7 +48,8 @@ pub struct PublicInterfaceWorker {
     /// receiving end of transaction which will be polled in websocket , updating state of tx to end user
     pub rpc_receiver_channel: Rc<RefCell<Receiver<TxStateMachine>>>,
     /// sender channel when user updates the transaction state, propagating to main service worker
-    pub user_rpc_update_sender_channel: Rc<RefCell<Sender<VanePayload<TxStateMachine, SignatureType>>>>,
+    pub user_rpc_update_sender_channel:
+        Rc<RefCell<Sender<VanePayload<TxStateMachine, SignatureType>>>>,
     // txn_counter
     // HashMap<txn_counter,Integrity hash>
     pub tx_integrity: Rc<RefCell<HashMap<u32, [u8; 32]>>>,
@@ -73,10 +74,11 @@ impl PublicInterfaceWorker {
         p2p_worker: Rc<WasmP2pWorker>,
         p2p_network_service: Rc<P2pNetworkService>,
         rpc_recv_channel: Rc<RefCell<Receiver<TxStateMachine>>>,
-        user_rpc_update_sender_channel: Rc<RefCell<Sender<VanePayload<TxStateMachine, SignatureType>>>>,
+        user_rpc_update_sender_channel: Rc<
+            RefCell<Sender<VanePayload<TxStateMachine, SignatureType>>>,
+        >,
         lru_cache: Rc<RefCell<LruCache<u32, TtlWrapper<TxStateMachine>>>>,
     ) -> Result<Self, JsValue> {
-
         Ok(Self {
             db_worker,
             p2p_worker,
@@ -270,7 +272,7 @@ impl PublicInterfaceWorker {
             .map_err(|e| JsError::new(&format!("Serialization error: {:?}", e)));
     }
 
-    pub async fn sender_confirm(&self,sig: Vec<u8>, tx: JsValue) -> Result<(), JsError> {
+    pub async fn sender_confirm(&self, sig: Vec<u8>, tx: JsValue) -> Result<(), JsError> {
         let mut tx: TxStateMachine = TxStateMachine::from_js_value_unconditional(tx)?;
         info!("sender_confirming transaction: {:?}", tx);
         let tx_integrity_hash = Self::compute_tx_integrity_hash(&tx);
@@ -340,7 +342,7 @@ impl PublicInterfaceWorker {
 
             let sender = sender_channel.clone();
             let vane_payload = VanePayload::new(tx.clone(), sig);
-            
+
             sender
                 .send(vane_payload)
                 .await
@@ -656,7 +658,6 @@ impl PublicInterfaceWorker {
         tx: JsValue,
         reason: Option<String>,
     ) -> Result<(), JsError> {
-      
         let mut tx: TxStateMachine = TxStateMachine::from_js_value_unconditional(tx)?;
 
         match tx.status {
@@ -910,7 +911,10 @@ impl PublicInterfaceWorkerJs {
         tx: JsValue,
         reason: Option<String>,
     ) -> Result<(), JsError> {
-        self.inner.borrow().revert_transaction(sig, tx, reason).await?;
+        self.inner
+            .borrow()
+            .revert_transaction(sig, tx, reason)
+            .await?;
         Ok(())
     }
 
